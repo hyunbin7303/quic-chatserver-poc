@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"log"
 	"net"
@@ -35,7 +36,8 @@ func main() {
 
 	// Accept incoming QUIC connections
 	for {
-		conn, err := listener.Accept(nil) // The argument is context.Context
+		// This is where error occurs.
+		conn, err := listener.Accept(context.Background()) // Pass context
 		if err != nil {
 			log.Println("Error accepting connection:", err)
 			continue
@@ -47,10 +49,10 @@ func main() {
 	}
 }
 
-func handleConnection(conn quic.Connection) {
+func handleConnection(conn *quic.Conn) {
 	// Implement your application logic here to handle streams and data
 	// For example, accept a stream and read/write data
-	stream, err := conn.AcceptStream(nil) // The argument is context.Context
+	stream, err := conn.AcceptStream(context.Background()) // Pass context
 	if err != nil {
 		log.Println("Error accepting stream:", err)
 		return
