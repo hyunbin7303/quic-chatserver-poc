@@ -3,72 +3,58 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
+	"io"
 	"log"
-	"net"
 
-	"github.com/quic-go/quic-go" // Assuming you have imported quic-go
+	quic "github.com/quic-go/quic-go"
 )
 
 func main() {
-	// Create a TLS configuration (you'll need to provide your own certificate and key)
-	tlsConf := &tls.Config{
-		Certificates: []tls.Certificate{}, // Load your certificate and key here
-		NextProtos:   []string{"h3"},      // For HTTP/3
-	}
-
-	// Listen on a UDP address
-	addr := "localhost:4242"
-	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	listener, err := quic.ListenAddr("localhost:4242", generateTLSConfig(), nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	udpConn, err := net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Create a QUIC listener
-	listener, err := quic.Listen(udpConn, tlsConf, nil) // The third argument is quic.Config
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("Listening on %s", addr)
-
-	// Accept incoming QUIC connections
+	fmt.Println("Server listening on localhost:4242 ...")
 	for {
-		// This is where error occurs.
-		conn, err := listener.Accept(context.Background()) // Pass context
+		sess, err := listener.Accept(context.Background())
 		if err != nil {
-			log.Println("Error accepting connection:", err)
-			continue
+			log.Fatal(err)
 		}
-		log.Printf("Accepted new connection from %s", conn.RemoteAddr())
+		go func(sess *quic.Conn) {
+			stream, err := sess.AcceptStream(context.Background())
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			buf := make([]byte, 1024)
+			n, err := stream.Read(buf)
+			if err != nil && err != io.EOF {
+				log.Println(err)
+			}
+			fmt.Printf("Server received: %s\n", string(buf[:n]))
 
-		// Handle the connection in a new goroutine
-		go handleConnection(conn)
+			stream.Write([]byte("Hello from server over QUIC!"))
+		}(sess)
 	}
 }
 
-func handleConnection(conn *quic.Conn) {
-	// Implement your application logic here to handle streams and data
-	// For example, accept a stream and read/write data
-	stream, err := conn.AcceptStream(context.Background()) // Pass context
+func generateTLSConfig() *tls.Config {
+	cert, err := tls.X509KeyPair(serverCert, serverKey)
 	if err != nil {
-		log.Println("Error accepting stream:", err)
-		return
+		log.Fatal(err)
 	}
-	defer stream.Close()
 
-	buf := make([]byte, 1024)
-	n, err := stream.Read(buf)
-	if err != nil {
-		log.Println("Error reading from stream:", err)
-		return
-	}
-	log.Printf("Received: %s", string(buf[:n]))
-
-	_, err = stream.Write([]byte("Hello from QUIC server!"))
-	if err != nil {
-		log.Println("Error writing to stream:", err)
+	return &tls.Config{
+		InsecureSkipVerify: true,
+		Certificates:       []tls.Certificate{cert}, // Load your certificate and key here
+		NextProtos:         []string{"h3"},          // Add this line
 	}
 }
+
+var serverCert = []byte(`-----BEGIN CERTIFICATE-----
+MIIB...
+-----END CERTIFICATE-----`)
+var serverKey = []byte(`-----BEGIN RSA PRIVATE KEY-----
+MIIE...
+-----END RSA PRIVATE KEY-----`)

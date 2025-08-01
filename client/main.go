@@ -1,37 +1,39 @@
-package client
+package main
 
-// import (
-// 	"crypto/tls"
-// 	"io"
-// 	"log"
-// 	"net/http"
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"io"
+	"log"
 
-// 	"github.com/quic-go/quic-go/http3" // For HTTP/3 client
-// )
+	quic "github.com/quic-go/quic-go"
+)
 
-// func main() {
-// 	// For a generic QUIC client, you would use quic.DialAddr
-// 	// For HTTP/3, use http3.RoundTripper
+func main() {
 
-// 	// Create a custom HTTP client with the http3.RoundTripper
-// 	client := &http.Client{
-// 		Transport: &http3.RoundTripper{
-// 			TLSClientConfig: &tls.Config{
-// 				InsecureSkipVerify: true, // For testing, skip certificate verification
-// 			},
-// 		},
-// 	}
+	session, err := quic.DialAddr(context.Background(), "localhost:4242", &tls.Config{
+		InsecureSkipVerify: true,
+		Certificates:       []tls.Certificate{}, // Load your certificate and key here
+		NextProtos:         []string{"h3"},      // Add this line
+		ServerName:         "kevin",
+	}, nil)
 
-// 	// Make an HTTP/3 request
-// 	resp, err := client.Get("https://localhost:4242/") // Replace with your server address
-// 	if err != nil {
-// 		log.Fatal(err)
-// 	}
-// 	defer resp.Body.Close()
-
-// 	body, err := io.ReadAll(resp.Body)
-// 	if err != nil {
-// 		log.Fatal(err)
-// 	}
-// 	log.Printf("Response: %s", string(body))
-// }
+	if err != nil {
+		log.Fatal(err)
+	}
+	stream, err := session.OpenStreamSync(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = stream.Write([]byte("Hello from QUIC client!"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	reply := make([]byte, 1024)
+	n, err := stream.Read(reply)
+	if err != nil && err != io.EOF {
+		log.Fatal(err)
+	}
+	fmt.Printf("Client received: %s\n", string(reply[:n]))
+}
