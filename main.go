@@ -1,41 +1,141 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"log"
+	"sync"
 
 	quic "github.com/quic-go/quic-go"
 )
 
+type ChatClient struct {
+	ID       string
+	Stream   *quic.Stream // Should I make this a pointer or not?
+	Username string
+}
+
+type ChatServer struct {
+	clients    map[string]*ChatClient
+	clientsMux sync.RWMutex
+	nextID     int
+}
+
+func NewChatServer() *ChatServer {
+	return &ChatServer{
+		clients: make(map[string]*ChatClient),
+		nextID:  1,
+	}
+}
+
+func (cs *ChatServer) addClient(client *ChatClient) {
+	cs.clientsMux.Lock()
+	defer cs.clientsMux.Unlock()
+	cs.clients[client.ID] = client
+}
+
+func (cs *ChatServer) removeClient(clientID string) {
+	cs.clientsMux.Lock()
+	defer cs.clientsMux.Unlock()
+	delete(cs.clients, clientID)
+}
+
+func (cs *ChatServer) broadcast(message string, senderID string) {
+	cs.clientsMux.RLock()
+	defer cs.clientsMux.RUnlock()
+
+	for id, client := range cs.clients {
+		if id != senderID { // Don't send back to sender
+			client.Stream.Write([]byte(message + "\n"))
+		}
+	}
+}
+
+func (cs *ChatServer) getClientCount() int {
+	cs.clientsMux.RLock()
+	defer cs.clientsMux.RUnlock()
+	return len(cs.clients)
+}
+
+func (cs *ChatServer) handleClient(sess *quic.Conn) {
+	stream, err := sess.AcceptStream(context.Background())
+	if err != nil {
+		log.Printf("Error accepting stream: %v", err)
+		return
+	}
+
+	clientID := fmt.Sprintf("client-%d", cs.nextID)
+	cs.nextID++
+
+	client := &ChatClient{
+		ID:     clientID,
+		Stream: stream,
+	}
+
+	cs.addClient(client)
+	defer cs.removeClient(client.ID)
+
+	log.Printf("Client %s connected. Total clients: %d", clientID, cs.getClientCount())
+
+	// Send welcome message
+	welcomeMsg := fmt.Sprintf("[SERVER] Welcome to QUIC Chat! You are %s. Type your username to start chatting.", clientID)
+	stream.Write([]byte(welcomeMsg + "\n"))
+
+	// Send current user count
+	userCountMsg := fmt.Sprintf("[SERVER] Currently %d users online", cs.getClientCount())
+	stream.Write([]byte(userCountMsg + "\n"))
+
+	scanner := bufio.NewScanner(stream)
+	for scanner.Scan() {
+		message := scanner.Text()
+
+		if client.Username == "" {
+			// First message is username
+			client.Username = message
+			joinMsg := fmt.Sprintf("[SERVER] %s joined the chat!", client.Username)
+			cs.broadcast(joinMsg, client.ID)
+			stream.Write([]byte("[SERVER] Username set! Start chatting.\n"))
+		} else {
+			// Regular chat message
+			chatMsg := fmt.Sprintf("[%s] %s", client.Username, message)
+			log.Printf("Broadcasting: %s", chatMsg)
+			cs.broadcast(chatMsg, client.ID)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("Scanner error for client %s: %v", clientID, err)
+	}
+
+	// Client disconnected
+	if client.Username != "" {
+		leaveMsg := fmt.Sprintf("[SERVER] %s left the chat", client.Username)
+		cs.broadcast(leaveMsg, client.ID)
+	}
+	log.Printf("Client %s disconnected. Total clients: %d", clientID, cs.getClientCount())
+}
+
 func main() {
+	chatServer := NewChatServer()
+
 	listener, err := quic.ListenAddr("localhost:4242", generateTLSConfig(), nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("Server listening on localhost:4242 ...")
+
+	fmt.Println("QUIC Chat Server listening on localhost:4242 ...")
+	fmt.Println("Clients can connect using the client application.")
+
 	for {
 		sess, err := listener.Accept(context.Background())
 		if err != nil {
-			log.Fatal(err)
+			log.Printf("Error accepting connection: %v", err)
+			continue
 		}
-		go func(sess *quic.Conn) {
-			stream, err := sess.AcceptStream(context.Background())
-			if err != nil {
-				log.Println(err)
-				return
-			}
-			buf := make([]byte, 1024)
-			n, err := stream.Read(buf)
-			if err != nil && err != io.EOF {
-				log.Println(err)
-			}
-			fmt.Printf("Server received: %s\n", string(buf[:n]))
 
-			stream.Write([]byte("Hello from server over QUIC!"))
-		}(sess)
+		go chatServer.handleClient(sess)
 	}
 }
 
