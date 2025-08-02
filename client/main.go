@@ -1,14 +1,130 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"strings"
+	"sync"
 
 	quic "github.com/quic-go/quic-go"
 )
+
+type ChatClient struct {
+	session  *quic.Conn
+	stream   *quic.Stream
+	username string
+}
+
+func NewChatClient() *ChatClient {
+	return &ChatClient{}
+}
+
+func (cc *ChatClient) connect(serverAddr string) error {
+	session, err := quic.DialAddr(context.Background(), serverAddr, generateTLSConfig(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect to server: %v", err)
+	}
+
+	stream, err := session.OpenStreamSync(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to open stream: %v", err)
+	}
+
+	cc.session = session
+	cc.stream = stream
+	return nil
+}
+
+func (cc *ChatClient) startReceiving() {
+	scanner := bufio.NewScanner(cc.stream)
+	for scanner.Scan() {
+		message := scanner.Text()
+		fmt.Printf("\n%s\n", message)
+		fmt.Print("> ") // Re-print prompt
+	}
+
+	if err := scanner.Err(); err != nil {
+		if err != io.EOF {
+			log.Printf("Error reading from server: %v", err)
+		}
+	}
+}
+
+func (cc *ChatClient) startSending() {
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Print("Enter your username: ")
+
+	if scanner.Scan() {
+		cc.username = strings.TrimSpace(scanner.Text())
+		if cc.username == "" {
+			cc.username = "Anonymous"
+		}
+
+		// Send username to server
+		_, err := cc.stream.Write([]byte(cc.username + "\n"))
+		if err != nil {
+			log.Printf("Error sending username: %v", err)
+			return
+		}
+
+		fmt.Print("> ")
+	}
+
+	for scanner.Scan() {
+		message := strings.TrimSpace(scanner.Text())
+
+		if message == "" {
+			fmt.Print("> ")
+			continue
+		}
+
+		if message == "/quit" || message == "/exit" {
+			fmt.Println("Disconnecting from chat...")
+			break
+		}
+
+		// Send message to server
+		_, err := cc.stream.Write([]byte(message + "\n"))
+		if err != nil {
+			log.Printf("Error sending message: %v", err)
+			break
+		}
+
+		fmt.Print("> ")
+	}
+}
+
+func (cc *ChatClient) run(serverAddr string) error {
+	// Connect to server
+	if err := cc.connect(serverAddr); err != nil {
+		return err
+	}
+	defer cc.session.CloseWithError(0, "client disconnecting")
+
+	fmt.Printf("Connected to QUIC chat server at %s\n", serverAddr)
+	fmt.Println("Type /quit or /exit to disconnect")
+	fmt.Println("----------------------------------------")
+
+	// Start receiving messages in a goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		cc.startReceiving()
+	}()
+
+	// Start sending messages in main goroutine
+	cc.startSending()
+
+	// Wait for receiving goroutine to finish
+	wg.Wait()
+	return nil
+}
 
 func generateTLSConfig() *tls.Config {
 	cert, err := tls.X509KeyPair(serverCert, serverKey)
@@ -18,32 +134,18 @@ func generateTLSConfig() *tls.Config {
 
 	return &tls.Config{
 		InsecureSkipVerify: true,
-		Certificates:       []tls.Certificate{cert}, // Load your certificate and key here
-		NextProtos:         []string{"h3"},          // Add this line
+		Certificates:       []tls.Certificate{cert},
+		NextProtos:         []string{"h3"},
 	}
 }
 
 func main() {
+	serverAddr := "localhost:4242"
 
-	session, err := quic.DialAddr(context.Background(), "localhost:4242", generateTLSConfig(), nil)
-
-	if err != nil {
+	client := NewChatClient()
+	if err := client.run(serverAddr); err != nil {
 		log.Fatal(err)
 	}
-	stream, err := session.OpenStreamSync(context.Background())
-	if err != nil {
-		log.Fatal(err)
-	}
-	_, err = stream.Write([]byte("Hello from QUIC client!"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	reply := make([]byte, 1024)
-	n, err := stream.Read(reply)
-	if err != nil && err != io.EOF {
-		log.Fatal(err)
-	}
-	fmt.Printf("Client received: %s\n", string(reply[:n]))
 }
 
 var serverCert = []byte(`-----BEGIN CERTIFICATE-----
